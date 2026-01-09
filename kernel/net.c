@@ -10,6 +10,22 @@
 #include "file.h"
 #include "net.h"
 
+#define MAX_SOCK 16      // 最大支持的 socket 数量 
+#define MAX_QUEUE 10     // 每个端口队列最大存放包数 
+
+struct sock {
+  struct spinlock lock;
+  int used;
+  uint16 port;           // 绑定的本地端口 
+  char *queue[MAX_QUEUE]; // 存放数据包缓冲区的队列 [cite: 120]
+  int qlen[MAX_QUEUE];   // 存放包长度
+  uint32 src_ips[MAX_QUEUE]; // 存放来源 IP 
+  uint16 src_ports[MAX_QUEUE]; // 存放来源端口 
+  int head, tail;
+};
+
+static struct sock sockets[MAX_SOCK]; // 全局映射表 [cite: 128]
+
 // xv6's ethernet and IP addresses
 static uint8 local_mac[ETHADDR_LEN] = { 0x52, 0x54, 0x00, 0x12, 0x34, 0x56 };
 static uint32 local_ip = MAKE_IP_ADDR(10, 0, 2, 15);
@@ -23,6 +39,10 @@ void
 netinit(void)
 {
   initlock(&netlock, "netlock");
+  for(int i = 0; i < MAX_SOCK; i++) {
+    initlock(&sockets[i].lock, "socklock");
+    sockets[i].used = 0;
+  }
 }
 
 
@@ -34,11 +54,22 @@ netinit(void)
 uint64
 sys_bind(void)
 {
-  //
-  // Your code here.
-  //
+  int port;
+  argint(0, &port); // 获取用户传入的端口号 
 
-  return -1;
+  for(int i = 0; i < MAX_SOCK; i++){
+    acquire(&sockets[i].lock);
+    if(sockets[i].used == 0){
+      sockets[i].port = (uint16)port;
+      sockets[i].used = 1;
+      sockets[i].head = 0;
+      sockets[i].tail = 0;
+      release(&sockets[i].lock);
+      return 0;
+    }
+    release(&sockets[i].lock);
+  }
+  return -1; 
 }
 
 //
@@ -74,9 +105,50 @@ sys_unbind(void)
 uint64
 sys_recv(void)
 {
-  //
-  // Your code here.
-  //
+  int dport, maxlen;
+  uint64 src_addr, sport_addr, buf_addr;
+  
+  argint(0, &dport);
+  argaddr(1, &src_addr);
+  argaddr(2, &sport_addr);
+  argaddr(3, &buf_addr);
+  argint(4, &maxlen);
+
+  for(int i = 0; i < MAX_SOCK; i++){
+    acquire(&sockets[i].lock);
+    if(sockets[i].used && sockets[i].port == (uint16)dport){
+      // 如果队列为空，进程进入休眠，等待新包到达 [cite: 121, 130, 134]
+      while(sockets[i].head == sockets[i].tail){
+        if (myproc()->killed) {
+          release(&sockets[i].lock);
+          return -1;
+        }
+        sleep(&sockets[i], &sockets[i].lock);
+      }
+
+      int h = sockets[i].head;
+      char *packet_buf = sockets[i].queue[h];
+      int packet_len = sockets[i].qlen[h] > maxlen ? maxlen : sockets[i].qlen[h];
+
+      // 将内核数据拷贝到用户虚拟空间 [cite: 123, 131, 132]
+      struct proc *p = myproc();
+      if(copyout(p->pagetable, buf_addr, packet_buf, packet_len) < 0 ||
+         copyout(p->pagetable, src_addr, (char *)&sockets[i].src_ips[h], 4) < 0 ||
+         copyout(p->pagetable, sport_addr, (char *)&sockets[i].src_ports[h], 2) < 0) {
+        kfree(packet_buf);
+        sockets[i].head = (h + 1) % MAX_QUEUE;
+        release(&sockets[i].lock);
+        return -1;
+      }
+
+      kfree(packet_buf); // 释放已处理的包 
+      sockets[i].head = (h + 1) % MAX_QUEUE;
+      
+      release(&sockets[i].lock);
+      return packet_len;
+    }
+    release(&sockets[i].lock);
+  }
   return -1;
 }
 
@@ -188,10 +260,44 @@ ip_rx(char *buf, int len)
     printf("ip_rx: received an IP packet\n");
   seen_ip = 1;
 
-  //
-  // Your code here.
-  //
+  struct ip *ip = (struct ip *)(buf + sizeof(struct eth));
   
+  // 检查 IP 协议类型是否为 UDP 
+  if (ip->ip_p == IPPROTO_UDP) {
+    struct udp *udp = (struct udp *)(ip + 1);
+    uint16 dport = ntohs(udp->dport);
+    uint16 sport = ntohs(udp->sport);
+    uint32 sip = ntohl(ip->ip_src);
+    
+    // 计算 payload 位置和长度
+    char *payload = (char *)(udp + 1);
+    int payload_len = ntohs(udp->ulen) - sizeof(struct udp);
+
+    for(int i = 0; i < MAX_SOCK; i++){
+      acquire(&sockets[i].lock);
+      if(sockets[i].used && sockets[i].port == dport){
+        int next = (sockets[i].tail + 1) % MAX_QUEUE;
+        if(next != sockets[i].head){
+          // 申请新内存存放 payload 
+          char *q_buf = kalloc();
+          memmove(q_buf, payload, payload_len);
+          
+          sockets[i].queue[sockets[i].tail] = q_buf;
+          sockets[i].qlen[sockets[i].tail] = payload_len;
+          sockets[i].src_ips[sockets[i].tail] = sip;
+          sockets[i].src_ports[sockets[i].tail] = sport;
+          sockets[i].tail = next;
+          
+          wakeup(&sockets[i]); // 唤醒等待该端口的进程 [cite: 121, 127, 135]
+          release(&sockets[i].lock);
+          kfree(buf); // 释放原始网卡包缓冲区 [cite: 133]
+          return;
+        }
+      }
+      release(&sockets[i].lock);
+    }
+  }
+  kfree(buf); // 丢弃不匹配或非 UDP 包 [cite: 127]
 }
 
 //
