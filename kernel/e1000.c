@@ -94,68 +94,68 @@ e1000_init(uint32 *xregs)
 int
 e1000_transmit(char *buf, int len)
 {
-  // 必须使用锁保护共享资源，防止多个CPU同时操作寄存器或环 [cite: 97, 98]
+  // 使用锁保护共享资源，防止多个CPU同时操作寄存器或环
   acquire(&e1000_lock);
 
-  // 第一步：通过读取控制寄存器 E1000_TDT 获取下一个可用的 Tail 索引 [cite: 52]
+  // 读取控制寄存器 E1000_TDT 获取下一个可用的 Tail 索引
   uint32 idx = regs[E1000_TDT];
 
-  // 第二步：检查发送环是否溢出。检查 DD (Descriptor Done) 标志位 [cite: 53]
-  // 如果为 0，说明网卡还没处理完这个位置之前的包 [cite: 54]
+  // 检查发送环是否溢出。检查 DD (Descriptor Done) 标志位
+  // 如果为 0，说明网卡还没处理完这个位置之前的包
   if (!(tx_ring[idx].status & E1000_TXD_STAT_DD)) {
     release(&e1000_lock);
     return -1;
   }
 
-  // 第三步：如果该位置之前有缓冲区，释放它（在你的环境中使用 kfree） [cite: 55, 56]
+  // 如果该位置之前有缓冲区，释放它（使用 kfree）
   if (tx_bufs[idx]) {
     kfree(tx_bufs[idx]);
   }
 
-  // 第四步：填充描述符 [cite: 57]
-  // 根据错误提示，此时直接操作传入的 buf 和 len [cite: 58]
-  tx_bufs[idx] = buf;           // 保存指针用于以后释放 [cite: 61]
+  // 填充描述
+  // 根据错误提示，此时直接操作传入的 buf 和 len
+  tx_bufs[idx] = buf;           // 保存指针用于以后释放
   tx_ring[idx].addr = (uint64)buf;
   tx_ring[idx].length = len;
 
-  // 第五步：设置 cmd 标志位 [cite: 59, 60]
+  // 设置 cmd 标志位
   // EOP: End of Packet (报文结束); RS: Report Status (完成后设置 DD 位)
   tx_ring[idx].cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_RS;
 
-  // 第六步：更新 TDT 寄存器，注意取模防止越界 [cite: 62]
+  // 更新 TDT 寄存器，取模防止越界
   regs[E1000_TDT] = (idx + 1) % TX_RING_SIZE;
 
   release(&e1000_lock);
-  return 0; // 成功 [cite: 63]
+  return 0; // 成功
 }
 
 static void
 e1000_recv(void)
 {
-  // 循环处理接收环中所有待处理的描述符 [cite: 83, 89]
+  // 循环处理接收环中所有待处理的描述符
   while (1) {
-    // 第一步：通过 RDT 获取下一个待处理的索引 idx [cite: 85, 86]
+    // 通过 RDT 获取下一个待处理的索引 idx
     uint32 idx = (regs[E1000_RDT] + 1) % RX_RING_SIZE;
 
-    // 第二步：检查 DD 标志位判断是否有新包。如果不为 1 则退出 [cite: 87, 88]
+    // 检查 DD 标志位判断是否有新包。如果不为 1 则退出
     if (!(rx_ring[idx].status & E1000_RXD_STAT_DD)) {
       break;
     }
 
-    // 第三步：将收到的包传递给网络协议栈 [cite: 67, 75]
-    // 你的环境 net_rx 接收缓冲区地址和长度两个参数 [cite: 91, 92]
+    // 将收到的包传递给网络协议栈
+    // net_rx 接收缓冲区地址和长度两个参数
     net_rx(rx_bufs[idx], rx_ring[idx].length);
 
-    // 第四步：使用 kalloc 分配新缓冲区填补空位，使网卡能继续接收 [cite: 93, 94]
+    // 使用 kalloc 分配新缓冲区填补空位，使网卡能继续接收
     char *new_buf = kalloc();
     if (!new_buf) {
       panic("e1000_recv: kalloc failed");
     }
     rx_bufs[idx] = new_buf;
     rx_ring[idx].addr = (uint64)new_buf;
-    rx_ring[idx].status = 0; // 清除 DD 位 [cite: 77, 94]
+    rx_ring[idx].status = 0; // 清除 DD 位
 
-    // 第五步：更新 RDT 寄存器 [cite: 78, 95]
+    // 更新 RDT 寄存器
     regs[E1000_RDT] = idx;
   }
 }

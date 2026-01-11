@@ -17,14 +17,14 @@ struct sock {
   struct spinlock lock;
   int used;
   uint16 port;           // 绑定的本地端口 
-  char *queue[MAX_QUEUE]; // 存放数据包缓冲区的队列 [cite: 120]
+  char *queue[MAX_QUEUE]; // 存放数据包缓冲区的队列
   int qlen[MAX_QUEUE];   // 存放包长度
   uint32 src_ips[MAX_QUEUE]; // 存放来源 IP 
   uint16 src_ports[MAX_QUEUE]; // 存放来源端口 
   int head, tail;
 };
 
-static struct sock sockets[MAX_SOCK]; // 全局映射表 [cite: 128]
+static struct sock sockets[MAX_SOCK]; // 全局映射表
 
 // xv6's ethernet and IP addresses
 static uint8 local_mac[ETHADDR_LEN] = { 0x52, 0x54, 0x00, 0x12, 0x34, 0x56 };
@@ -117,7 +117,7 @@ sys_recv(void)
   for(int i = 0; i < MAX_SOCK; i++){
     acquire(&sockets[i].lock);
     if(sockets[i].used && sockets[i].port == (uint16)dport){
-      // 如果队列为空，进程进入休眠，等待新包到达 [cite: 121, 130, 134]
+      // 如果队列为空，进程进入休眠，等待新包到达
       while(sockets[i].head == sockets[i].tail){
         if (myproc()->killed) {
           release(&sockets[i].lock);
@@ -130,7 +130,7 @@ sys_recv(void)
       char *packet_buf = sockets[i].queue[h];
       int packet_len = sockets[i].qlen[h] > maxlen ? maxlen : sockets[i].qlen[h];
 
-      // 将内核数据拷贝到用户虚拟空间 [cite: 123, 131, 132]
+      // 将内核数据拷贝到用户虚拟空间
       struct proc *p = myproc();
       if(copyout(p->pagetable, buf_addr, packet_buf, packet_len) < 0 ||
          copyout(p->pagetable, src_addr, (char *)&sockets[i].src_ips[h], 4) < 0 ||
@@ -288,16 +288,16 @@ ip_rx(char *buf, int len)
           sockets[i].src_ports[sockets[i].tail] = sport;
           sockets[i].tail = next;
           
-          wakeup(&sockets[i]); // 唤醒等待该端口的进程 [cite: 121, 127, 135]
+          wakeup(&sockets[i]); // 唤醒等待该端口的进程
           release(&sockets[i].lock);
-          kfree(buf); // 释放原始网卡包缓冲区 [cite: 133]
+          kfree(buf); // 释放原始网卡包缓冲区
           return;
         }
       }
       release(&sockets[i].lock);
     }
   }
-  kfree(buf); // 丢弃不匹配或非 UDP 包 [cite: 127]
+  kfree(buf); // 丢弃不匹配或非 UDP 包
 }
 
 //
